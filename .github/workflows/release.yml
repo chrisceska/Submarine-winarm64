@@ -1,9 +1,9 @@
 name: Release
 
 # Fires when you push a tag like v0.1.0. The job builds Submarine on
-# Windows, macOS, and Ubuntu, stamps the tag's version into Cargo.toml
-# and tauri.conf.json so the bundled binary's version matches the tag,
-# and uploads the installers/bundles as a draft GitHub Release.
+# Windows ARM64, stamps the tag's version into Cargo.toml and tauri.conf.json
+# so the bundled binary's version matches the tag, and uploads the installers
+# and portable bundle as a draft GitHub Release.
 #
 # Triggering a release: locally run
 #   git tag v0.1.0 && git push origin v0.1.0
@@ -43,37 +43,33 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Windows: ships .msi (WiX) and .exe (NSIS). Both let the user
-          # double-click to install with no extra friction.
-          - platform: windows-latest
-            os_name: windows
+          # Fork release scope: keep the other desktop targets here for easy
+          # restoration, but only build native Windows ARM64.
+          # - platform: windows-latest
+          #   os_name: windows-x64
+          #   artifact_arch: x64
+          #   pe_machine: "8664"
+          #   bundles: "msi,nsis"
+          #   rust_target: x86_64-pc-windows-msvc
+
+          # Windows ARM64: build and test natively so an accidentally-emulated
+          # x64 binary can never be published as the ARM64 release.
+          - platform: windows-11-arm
+            os_name: windows-arm64
+            artifact_arch: arm64
+            pe_machine: "AA64"
             bundles: "msi,nsis"
-            rust_target: x86_64-pc-windows-msvc
+            rust_target: aarch64-pc-windows-msvc
 
-          # macOS Apple Silicon. We produce both:
-          #   - Submarine.app (zipped → unzip + double-click, no DMG drag)
-          #   - Submarine_x.y.z_aarch64.dmg (classic DMG installer)
-          # Intel macOS users can run this same arm64 build under Rosetta 2 —
-          # we dropped the dedicated macos-13 (Intel) matrix entry because
-          # GitHub's Intel macOS runner pool is so scarce that jobs would
-          # routinely hit the 45-minute queue timeout and fail the release.
-          - platform: macos-latest
-            os_name: macos-arm64
-            bundles: "app,dmg"
-            rust_target: aarch64-apple-darwin
+          # - platform: macos-latest
+          #   os_name: macos-arm64
+          #   bundles: "app,dmg"
+          #   rust_target: aarch64-apple-darwin
 
-          # Linux: ship four flavours so users on any major distro can
-          # double-click an installer that matches their package manager:
-          #   - .deb   → Debian / Ubuntu / Mint
-          #   - .rpm   → Fedora / RHEL / openSUSE
-          #   - .AppImage → distro-agnostic, no install required
-          # And a separate Arch step further down produces .pkg.tar.zst
-          # via makepkg inside an Arch Docker container (Tauri's bundler
-          # has no native Arch backend).
-          - platform: ubuntu-22.04
-            os_name: linux-x64
-            bundles: "deb,rpm,appimage"
-            rust_target: x86_64-unknown-linux-gnu
+          # - platform: ubuntu-22.04
+          #   os_name: linux-x64
+          #   bundles: "deb,rpm,appimage"
+          #   rust_target: x86_64-unknown-linux-gnu
 
     runs-on: ${{ matrix.platform }}
 
@@ -193,6 +189,20 @@ jobs:
         with:
           args: --target ${{ matrix.rust_target }} --bundles ${{ matrix.bundles }}
 
+      - name: Verify Windows executable architecture
+        if: startsWith(matrix.os_name, 'windows')
+        shell: pwsh
+        run: |
+          $exe = "src-tauri/target/${{ matrix.rust_target }}/release/submarine.exe"
+          $bytes = [System.IO.File]::ReadAllBytes($exe)
+          $peOffset = [BitConverter]::ToInt32($bytes, 0x3c)
+          $machine = [BitConverter]::ToUInt16($bytes, $peOffset + 4)
+          $expected = [Convert]::ToUInt16("${{ matrix.pe_machine }}", 16)
+          if ($machine -ne $expected) {
+            throw "Expected PE machine 0x$($expected.ToString('X4')), got 0x$($machine.ToString('X4'))"
+          }
+          Write-Host "Verified $exe is PE machine 0x$($machine.ToString('X4'))"
+
       # Arch: Tauri's bundler has no native pacman backend, so we run
       # makepkg ourselves inside an `archlinux:latest` container. The
       # PKGBUILD in packaging/arch/ installs the already-built Tauri
@@ -262,7 +272,7 @@ jobs:
 
       # Collect every artifact this job produced into one folder for upload.
       - name: Stage artifacts (Windows)
-        if: matrix.os_name == 'windows'
+        if: startsWith(matrix.os_name, 'windows')
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path artifacts | Out-Null
@@ -275,7 +285,7 @@ jobs:
       # ZipFile records the empty folder as an entry, so it survives the round
       # trip and the extracted copy is portable out of the box.
       - name: Zip Windows portable build
-        if: matrix.os_name == 'windows'
+        if: startsWith(matrix.os_name, 'windows')
         shell: pwsh
         run: |
           $stage = New-Item -ItemType Directory -Force -Path portable-build
@@ -284,7 +294,7 @@ jobs:
           Copy-Item packaging/windows/README-portable.txt (Join-Path $stage.FullName README.txt)
           New-Item -ItemType Directory -Force -Path artifacts | Out-Null
           Add-Type -AssemblyName System.IO.Compression.FileSystem
-          $zip = Join-Path (Resolve-Path artifacts).Path "Submarine-v${{ env.VERSION }}-windows-x64-portable.zip"
+          $zip = Join-Path (Resolve-Path artifacts).Path "Submarine-v${{ env.VERSION }}-windows-${{ matrix.artifact_arch }}-portable.zip"
           [System.IO.Compression.ZipFile]::CreateFromDirectory($stage.FullName, $zip)
 
       - name: Stage artifacts (macOS)
@@ -325,6 +335,8 @@ jobs:
   # secret is missing, the build still runs but Gradle will produce an
   # unsigned release APK — the keystore secrets are gating, not blocking.
   android:
+    # Disabled in this fork: GitHub Actions only produces Windows ARM64 builds.
+    if: ${{ false }}
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
@@ -513,10 +525,10 @@ jobs:
           path: artifacts/*
           if-no-files-found: error
 
-  # Gather every platform's artifacts and attach them to a GitHub Release.
+  # Attach the Windows ARM64 artifacts to a GitHub Release.
   # Skips when triggered via workflow_dispatch unless `publish_release=true`.
   release:
-    needs: [build, android]
+    needs: [build]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v') || github.event.inputs.publish_release == 'true'
     steps:

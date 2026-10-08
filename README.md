@@ -14,6 +14,9 @@
 
 ---
 
+> [!IMPORTANT]
+> This repository is a fork of the [upstream Submarine project](https://github.com/sinaxhpm/submarine), maintained specifically to build and distribute native **Windows ARM64** releases. GitHub Actions and release artifacts in this fork target Windows ARM64 only; use the upstream repository for macOS, Linux, Android, and Windows x64 builds.
+
 <div align="center">
   <img src="docs/screenshots/hero.png" alt="Submarine main window — terminal session with dual-pane SFTP browser open on the right" width="900" />
 </div>
@@ -286,6 +289,21 @@ npm install
 npm run tauri dev          # run in development
 npm run tauri build        # build release bundle
 ```
+
+### Windows ARM64 build
+
+Install the ARM64 MSVC tools and Windows SDK through Visual Studio Build Tools,
+plus LLVM/Clang (required by `ring` on Windows ARM64). Then add the Rust target
+and build both Windows installers:
+
+```powershell
+rustup target add aarch64-pc-windows-msvc
+npm ci
+npm exec tauri -- build --target aarch64-pc-windows-msvc --bundles nsis,msi
+```
+
+The release workflow runs this build natively on GitHub's `windows-11-arm`
+runner and verifies that the resulting executable's PE machine type is ARM64.
 
 ### Android build
 
